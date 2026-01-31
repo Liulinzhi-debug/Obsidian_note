@@ -1,3 +1,4 @@
+## PPO
 - AC 的 Model-free 策略
 - 通过**最小化 Loss** 来等价于**最大化期望收益**。因此，PPO 的目标函数会加上负号转换为 Loss。
 
@@ -11,7 +12,7 @@ $$L^{CLIP}(\theta) = \mathbb{E}_t \left[ \max \left( -r_t(\theta)\hat{A}_t, \;\;
    - 含义：允许策略发生变化的最大幅度（通常为 0.1 或 0.2），防止参数更新过大导致模型崩溃。
    
 ```python
-
+# verl/trainer/ppo/core_algos.py
 def compute_policy_loss(old_log_prob, log_prob, advantages, response_mask, 
                         cliprange, cliprange_low, cliprange_high, clip_ratio_c=3.0, ...):
     
@@ -76,4 +77,127 @@ def compute_policy_loss(old_log_prob, log_prob, advantages, response_mask,
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
-	```
+```
+
+---
+## Generalized Advantage Estimation (GAE)
+- **Critic 视角的评价机制**
+- 平衡 **方差 (Variance)** 和 **偏差 (Bias)** 的优势估计方法。通过引入 $\lambda$ 参数，在单步 TD (低方差高偏差) 和 蒙特卡洛 (高方差低偏差) 之间寻找平衡点。
+$$A_t^{GAE(\gamma, \lambda)} = \sum_{l=0}^{\infty} (\gamma \lambda)^l \delta_{t+l}, \quad \text{where} \quad \delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$$
+**$\delta_t$ (TD Error)**:
+- 含义：单步差分误差。即“真实发生的奖励 + 对未来的预估”与“当前预估”的差值。
+    **$\gamma$ (Discount Factor)**:
+- 含义：折扣因子（通常 0.99）。决定了模型看多远的未来。
+    **$\lambda$ (Smoothing Parameter)**:
+- 含义：平滑系数（通常 0.95）。$\lambda=0$ 时退化为单步 TD，$\lambda=1$ 时接近蒙特卡洛。
+    **Returns ($R_t$)**:
+- 含义：回报。$R_t = A_t + V(s_t)$，用于作为 Critic 模型训练的标签（Target）。
+```Python
+# verl/trainer/ppo/core_algos.py
+def compute_gae_advantage_return(token_level_rewards, values, response_mask, gamma, lam):
+    """
+    计算 GAE 优势和 Returns
+    """
+    with torch.no_grad(): # 不需要梯度，这是在生成标签
+        nextvalues = 0   # V(t+1)，也就是下一时刻的价值
+        lastgaelam = 0   # A(t+1)，也就是下一时刻的优势
+        advantages_reversed = []
+        gen_len = token_level_rewards.shape[-1]
+
+        # ---------------------------------------------------------------------
+        # 1. 逆序遍历 (Reverse Loop)
+        # ---------------------------------------------------------------------
+        # 必须从未来推导现在。因为 A_t 依赖于 A_{t+1}
+        for t in reversed(range(gen_len)):
+            
+            # ---------------------------------------------------------------------
+            # 2. 计算 TD Error (delta)
+            # ---------------------------------------------------------------------
+            # delta = r_t + gamma * V_{t+1} - V_t
+            # 代表当前这一步产生的“惊喜”（好于预期还是差于预期）
+            delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
+            
+            # ---------------------------------------------------------------------
+            # 3. 递归计算 GAE (Advantage)
+            # ---------------------------------------------------------------------
+            # A_t = delta + (gamma * lambda) * A_{t+1}
+            # lastgaelam_ 是当前步计算出的未处理 Mask 的优势
+            lastgaelam_ = delta + gamma * lam * lastgaelam
+
+            # ---------------------------------------------------------------------
+            # 4. Mask 处理 (Padding Handling)
+            # ---------------------------------------------------------------------
+            # 处理序列结束或 Padding 的情况。
+            # 如果 response_mask[:, t] 为 0 (padding)，则 nextvalues 和 lastgaelam 保持不变
+            # 或者是被重置（取决于具体实现逻辑，这里是穿透逻辑）
+            nextvalues = values[:, t] * response_mask[:, t] + (1 - response_mask[:, t]) * nextvalues
+            lastgaelam = lastgaelam_ * response_mask[:, t] + (1 - response_mask[:, t]) * lastgaelam
+
+            advantages_reversed.append(lastgaelam)
+        
+        # 翻转回来，变成正常的时间顺序
+        advantages = torch.stack(advantages_reversed[::-1], dim=1)
+
+        # ---------------------------------------------------------------------
+        # 5. 计算 Critic 的目标 (Returns)
+        # ---------------------------------------------------------------------
+        # Returns = Advantage + Value。这是 Critic 需要拟合的真实标签。
+        returns = advantages + values
+        
+        # [标准化] 对优势进行 Whiten (减均值除方差)，这对 PPO 收敛至关重要
+        advantages = verl_F.masked_whiten(advantages, response_mask)
+        
+    return advantages, returns
+```
+
+---
+## L_value (Critic Loss)
+- **Critic 模型的损失函数**
+- Critic 的任务是预测状态价值 $V(s)$。损失函数是预测值与真实回报 $R_t$ 之间的 **MSE (均方误差)**。PPO 这里也引入了 **Clip 机制**，防止 Value 更新过猛。
+$$L^{VF}_t = \frac{1}{2} \max \left[ (V_\theta(s_t) - R_t)^2, \;\; (\text{clip}(V_\theta(s_t), V_{old}-\epsilon, V_{old}+\epsilon) - R_t)^2 \right]$$
+**$V_\theta(s_t)$ (Pred)**:
+- 含义：当前 Critic 模型预测的价值。
+    **$R_t$ (Target)**:
+- 含义：GAE 阶段计算出来的 Returns（真实回报），作为 Ground Truth。
+    **$V_{old}$ (Old Pred)**:
+- 含义：更新前 Critic 模型的预测值。
+    **Clip Range ($\epsilon$)**:
+- 含义：允许价值预测偏离旧预测的最大幅度。
+```Python
+# verl/trainer/ppo/core_algos.py
+def compute_value_loss(vpreds, returns, values, eos_mask, cliprange_value):
+    """
+    vpreds: 当前 Critic 的预测值
+    values: 旧 Critic 的预测值 (Old Value)
+    returns: 真实回报 (Target)
+    """
+    
+    # ---------------------------------------------------------------------
+    # 1. 价值截断 (Value Clipping)
+    # ---------------------------------------------------------------------
+    # 强制当前预测值 vpreds 不能偏离旧值 values 太多
+    # 范围限制在 [values - epsilon, values + epsilon]
+    vpredclipped = verl_F.clip_by_value(vpreds, values - cliprange_value, values + cliprange_value)
+    
+    # ---------------------------------------------------------------------
+    # 2. 计算两个 Loss
+    # ---------------------------------------------------------------------
+    # Loss1: 原始 MSE (预测值 - 真实值)^2
+    vf_losses1 = (vpreds - returns)**2
+    # Loss2: 截断后的 MSE
+    vf_losses2 = (vpredclipped - returns)**2
+    
+    # ---------------------------------------------------------------------
+    # 3. 取最大值 (Pessimistic Bound)
+    # ---------------------------------------------------------------------
+    # 这里取 max 是为了取由“惩罚更大”的那一项主导的 Loss。
+    # 如果预测值跑得太偏（触发 Clip），Loss 会变得很大，强迫模型退回来。
+    vf_loss = 0.5 * verl_F.masked_mean(torch.max(vf_losses1, vf_losses2), eos_mask)
+    
+    # 统计有多少比例的数据触发了截断 (用于监控)
+    vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), eos_mask)
+    
+    return vf_loss, vf_clipfrac
+```
+
+---
