@@ -290,36 +290,74 @@ def compute_value_loss(vpreds, returns, values, response_mask, cliprange_value, 
 ```
 
 ---
-## Total Loss Aggregation 
-- **最终优化目标**
-- 在 PPO 的训练步（Training Step）中，四个 Loss 会被加权求和，形成最终用于反向传播的 `loss`。$$L_{total} = L_{policy} + \alpha \cdot L_{value} - \beta \cdot H(\pi)$$
-    **Policy Loss ($L_{policy}$)**: 推动模型生成高回报动作。
-    
-    **Value Loss ($L_{value}$)**: 修正 Critic 对价值的判断 (系数 $\alpha$ 通常为 0.5 或 1.0)。
-    
-    **Entropy Bonus ($-H(\pi)$)**: 鼓励探索 (系数 $\beta$ 通常很小，如 0.01，且随训练衰减)。注意这里是**减去熵**（因为我们要最大化熵，即最小化负熵）。
-    
-    **KL Penalty**: 通常已经包含在 Reward 计算中（作为 Reward 的减项），或者作为额外的 Loss 项加入。
-    
+## PPO 总损失函数 
+#### **目标 A：Actor 的更新 (对应 `ppo_loss`)**
+$$L_{Actor}(\theta) = \underbrace{L^{CLIP}(\theta)}_{Policy} - \underbrace{c_{ent} H(\pi_\theta)}_{Entropy} + \underbrace{c_{kl} D_{KL}(\pi_\theta || \pi_{ref})}_{KL}$$
+#### **目标 B：Critic 的更新 (对应 `value_loss`)**
 
-Python
+$$L_{Critic}(\phi) = \underbrace{L^{VF}(\phi)}_{Critic}$$
+```python
+# verl/workers/utils/losses.py
 
+def ppo_loss(config: ActorConfig, model_output, data: TensorDict, ...):
+    """
+    计算 Actor 的总 Loss: Policy Gradient + Entropy + KL
+    """
+    # ---------------------------------------------------------------------
+    # 1. 策略梯度损失 (Policy Gradient Loss)
+    # ---------------------------------------------------------------------
+    # 对应公式: L_CLIP (通常包含负号，因为我们要最小化 Loss)
+    # 输入: 旧策略概率(old_log_prob), 当前策略概率(log_prob), 优势(advantages)
+    pg_loss, pg_metrics = policy_loss_fn(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        ...
+    )
+    policy_loss = pg_loss
+
+    # ---------------------------------------------------------------------
+    # 2. 熵正则项 (Entropy Bonus)
+    # ---------------------------------------------------------------------
+    # 对应公式: - c_ent * H(π)
+    # 逻辑: 熵越大越好(鼓励探索)，所以在 Loss 中是减去熵(最小化负熵)
+    if entropy is not None:
+        entropy_loss = agg_loss(loss_mat=entropy, ...)
+        
+        # [关键操作] -= (减号)
+        policy_loss -= config.entropy_coeff * entropy_loss
+
+    # ---------------------------------------------------------------------
+    # 3. KL 散度惩罚 (KL Penalty)
+    # ---------------------------------------------------------------------
+    # 对应公式: + c_kl * D_KL(π || π_ref)
+    # 逻辑: 这里的 KL 是作为 Loss 的一部分显式加入的 (有些实现是放在 Reward 里)
+    # 如果 KL 过大，Loss 变大，梯度会把模型拉回来
+    if config.use_kl_loss:
+        # 计算 log(pi) - log(ref) 等散度指标
+        kld = kl_penalty(logprob=log_prob, ref_logprob=data["ref_log_prob"], ...)
+        kl_loss = agg_loss(loss_mat=kld, ...)
+
+        # [关键操作] += (加号)
+        policy_loss += kl_loss * config.kl_loss_coef
+
+    return policy_loss, metrics
+
+def value_loss(config: CriticConfig, model_output, data: TensorDict, ...):
+    """
+    计算 Critic 的 Loss: Value Function Error
+    """
+    # ---------------------------------------------------------------------
+    # 4. 价值损失 (Value Loss)
+    # ---------------------------------------------------------------------
+    # 对应公式: c_vf * MSE(V_pred, V_target)
+    # 通常包含 Clip 机制: max((V - R)^2, (V_clipped - R)^2)
+    vf_loss, vf_clipfrac = compute_value_loss(
+        vpreds=vpreds,
+        returns=data["returns"], # 真实回报 (Target)
+        values=data["values"],   # 旧预测值 (用于 Clip)
+        ...
+    )
+    
+    return vf_loss, metrics
 ```
-# 伪代码逻辑演示 (通常在 PPO Trainer 的 update_step 中)
-
-# 1. 计算各项 Loss
-pg_loss, ... = compute_policy_loss(log_prob, old_log_prob, advantages, ...)
-vf_loss, ... = compute_value_loss(vpreds, returns, values, ...)
-entropy = entropy_from_logits(logits).mean() # 计算平均熵
-
-# 2. 加权求和 (Total Loss)
-# vf_coef: 价值损失系数 (e.g., 0.5)
-# ent_coef: 熵正则系数 (e.g., 0.01)
-loss = pg_loss + (vf_coef * vf_loss) - (ent_coef * entropy)
-
-# 3. 反向传播
-optimizer.zero_grad()
-loss.backward()
-optimizer.step()
-```
-
