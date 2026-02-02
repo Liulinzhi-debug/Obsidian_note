@@ -4,11 +4,11 @@
     "type": "split",
     "children": [
       {
-        "id": "4f9764582510d064",
+        "id": "8870e67270adb2d9",
         "type": "tabs",
         "children": [
           {
-            "id": "05c00d9bd8b1f6ae",
+            "id": "1dd4ca6f39329bfc",
             "type": "leaf",
             "state": {
               "type": "markdown",
@@ -194,10 +194,10 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "05c00d9bd8b1f6ae",
+  "active": "1dd4ca6f39329bfc",
   "lastOpenFiles": [
-    "GRPO-verl.md",
     "GDPO-基于verl实现对比.md",
+    "GRPO-verl.md",
     "PPO-verl.md",
     "未命名.canvas",
     "2026-02-01.md",
