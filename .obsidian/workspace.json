@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "GDPO-基于verl实现对比.md",
+                "file": "GDPO-verl.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "GDPO-基于verl实现对比"
+              "title": "GDPO-verl"
             }
           }
         ]
@@ -40,7 +40,7 @@
             "state": {
               "type": "file-explorer",
               "state": {
-                "sortOrder": "alphabetical",
+                "sortOrder": "byCreatedTime",
                 "autoReveal": false
               },
               "icon": "lucide-folder-closed",
@@ -196,8 +196,11 @@
   },
   "active": "1dd4ca6f39329bfc",
   "lastOpenFiles": [
-    "GDPO-基于verl实现对比.md",
+    "Pasted image 20260202130518.png",
+    "Pasted image 20260202130516.png",
+    "Pasted image 20260202130436.png",
     "GRPO-verl.md",
+    "GDPO-verl.md",
     "PPO-verl.md",
     "未命名.canvas",
     "2026-02-01.md",
